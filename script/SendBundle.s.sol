@@ -20,7 +20,7 @@ contract InteropSendBundleLiveScript is Script {
 
     function run() public {
         address sender     = msg.sender;
-        uint256 destChain  = vm.envUint("DEST_CHAIN_ID");
+        uint256 destChain  = vm.envUint("DEST_CHAIN_ID");   // e.g. 506
         uint256 feeValue = 1 ether;
 
         console.log("Sender          :", sender);
@@ -29,7 +29,7 @@ contract InteropSendBundleLiveScript is Script {
         vm.startBroadcast();
 
         /* ------------------------------------------------------------------ */
-        /*  Deploy a dev ERC‑20 and register it in the NativeTokenVault        */
+        /*  Deploy token and register it in the NativeTokenVault        */
         /* ------------------------------------------------------------------ */
         TestToken token = new TestToken("Token A","AA");
         token.mint(sender, 100 ether);
@@ -38,13 +38,13 @@ contract InteropSendBundleLiveScript is Script {
         bytes32 assetId = vault.assetId(address(token));
 
         /* ------------------------------------------------------------------ */
-        /*  Build payload      */
+        /*  Build payload     */
         /* ------------------------------------------------------------------ */
         bytes memory assetRouterCalldata = abi.encodePacked(
             bytes1(0x01),
             abi.encode(assetId,
                        abi.encode(uint256(100 ether),
-                                  sender,            
+                                  sender,
                                   address(0)))
         );
 
@@ -62,14 +62,17 @@ contract InteropSendBundleLiveScript is Script {
         );
 
         InteropCallStarter[] memory calls = new InteropCallStarter[](2);
-        calls[0] = InteropCallStarter({ nextContract: address(L2_ASSET_ROUTER),
-                                        data:         assetRouterCalldata,
+        calls[0] = InteropCallStarter({ nextContract: address(0),
+                                        data:         hex"",
                                         callAttributes: feeAttrs });
 
-        // calls[1] = InteropCallStarter({ nextContract: address(L2_ASSET_ROUTER),
-        //                                 data:         assetRouterCalldata,
-        //                                 callAttributes: execAttrs });
+        calls[1] = InteropCallStarter({ nextContract: address(L2_ASSET_ROUTER),
+                                        data:         assetRouterCalldata,
+                                        callAttributes: execAttrs });
 
+        /* ------------------------------------------------------------------ */
+        /*  Send bundle                           */
+        /* ------------------------------------------------------------------ */
         bytes32 bundleHash = interop.sendBundle{ value: feeValue }(
             destChain,
             calls,
