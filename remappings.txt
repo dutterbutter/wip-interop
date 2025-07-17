@@ -1,0 +1,3 @@
+@zksync-contracts/=lib/era-contracts/l1-contracts/
+@zksync-system-contracts/=lib/era-contracts/system-contracts/contracts/
+@openzeppelin/=lib/openzeppelin-contracts/
