@@ -2,86 +2,60 @@
 pragma solidity ^0.8.28;
 
 import "forge-std/Script.sol";
-import "forge-std/console.sol";
-
-import { IInteropCenter }      from "@zksync-contracts/contracts/interop/IInteropCenter.sol";
-import { INativeTokenVault }   from "@zksync-contracts/contracts/bridge/ntv/INativeTokenVault.sol";
-import { IERC7786Attributes }  from "@zksync-contracts/contracts/interop/IERC7786Attributes.sol";
-import { InteropCallStarter }  from "@zksync-contracts/contracts/common/Messaging.sol";
-import { L2_NATIVE_TOKEN_VAULT,
-         L2_INTEROP_CENTER,
-         L2_ASSET_ROUTER }     from "@zksync-system-contracts/Constants.sol";
-
+import "@zksync-contracts/contracts/bridgehub/IBridgehub.sol";
+import "@zksync-contracts/contracts/interop/IInteropCenter.sol";
+import "@zksync-contracts/contracts/bridge/ntv/INativeTokenVault.sol";
+import {InteropCallStarter} from "@zksync-contracts/contracts/common/Messaging.sol";
+import {IERC7786Attributes} from "@zksync-contracts/contracts/interop/IERC7786Attributes.sol";
 import "../src/TestToken.sol";
+import {L2_NATIVE_TOKEN_VAULT, L2_INTEROP_CENTER, L2_ASSET_ROUTER} from "@zksync-system-contracts/Constants.sol";
 
-contract InteropSendBundleLiveScript is Script {
-    IInteropCenter   constant interop = IInteropCenter(address(L2_INTEROP_CENTER));
-    INativeTokenVault constant vault  = INativeTokenVault(address(L2_NATIVE_TOKEN_VAULT));
-
-    function run() public {
-        address sender     = msg.sender;
-        uint256 destChain  = vm.envUint("DEST_CHAIN_ID");   // e.g. 506
-        uint256 feeValue = 1 ether;
-
-        console.log("Sender          :", sender);
-        console.log("Destination CID :", destChain);
-
+contract SendInteropBundle is Script {
+    function run() external {
         vm.startBroadcast();
 
-        /* ------------------------------------------------------------------ */
-        /*  Deploy token and register it in the NativeTokenVault        */
-        /* ------------------------------------------------------------------ */
-        TestToken token = new TestToken("Token A","AA");
+        address sender = msg.sender;
+        uint256 destChain = 506;
+        uint256 fee = 1 ether;
+
+        // deploy & mint TestToken on source chain
+        TestToken token = new TestToken("Token A", "AA");
         token.mint(sender, 100 ether);
-        token.approve(address(vault), 100 ether);
-        vault.registerToken(address(token));
-        bytes32 assetId = vault.assetId(address(token));
 
-        /* ------------------------------------------------------------------ */
-        /*  Build payload     */
-        /* ------------------------------------------------------------------ */
-        bytes memory assetRouterCalldata = abi.encodePacked(
-            bytes1(0x01),
-            abi.encode(assetId,
-                       abi.encode(uint256(100 ether),
-                                  sender,
-                                  address(0)))
+        // approve + register
+        token.approve(address(L2_NATIVE_TOKEN_VAULT), 100 ether);
+        INativeTokenVault(address(L2_NATIVE_TOKEN_VAULT)).registerToken(address(token));
+        bytes32 assetId = INativeTokenVault(address(L2_NATIVE_TOKEN_VAULT)).assetId(address(token));
+
+        // build payload & call attributes
+        bytes memory payload = abi.encodePacked(
+            hex"01",
+            abi.encode(assetId, abi.encode(uint256(100 ether), sender, address(0)))
         );
 
-        /* ------------------------------------------------------------------ */
-        /*  Build call‑starters                                               */
-        /* ------------------------------------------------------------------ */
-        bytes[] memory feeAttrs = new bytes[](1);
-        feeAttrs[0] = abi.encodeWithSelector(
-            IERC7786Attributes.interopCallValue.selector, feeValue
+        InteropCallStarter[] memory calls = new InteropCallStarter[](1);
+        calls[0] = InteropCallStarter({
+            nextContract: address(L2_ASSET_ROUTER),
+            data:         payload,
+            callAttributes: new bytes[](1)
+        });
+        calls[0].callAttributes[0] = abi.encodeWithSelector(
+            IERC7786Attributes.interopCallValue.selector,
+            fee
         );
 
-        bytes[] memory execAttrs = new bytes[](1);
-        execAttrs[0] = abi.encodeWithSelector(
-            IERC7786Attributes.indirectCall.selector, uint256(0)
-        );
+        // TODO: seems to fail unless we mockcall L2_BASE_TOKEN_SYSTEM_CONTRACT_ADDR burnMsgValue?
+        // weird as L2_BASE_TOKEN_SYSTEM_CONTRACT_ADDR is deployed on the chain? 
 
-        InteropCallStarter[] memory calls = new InteropCallStarter[](2);
-        calls[0] = InteropCallStarter({ nextContract: address(0),
-                                        data:         hex"",
-                                        callAttributes: feeAttrs });
-
-        calls[1] = InteropCallStarter({ nextContract: address(L2_ASSET_ROUTER),
-                                        data:         assetRouterCalldata,
-                                        callAttributes: execAttrs });
-
-        /* ------------------------------------------------------------------ */
-        /*  Send bundle                           */
-        /* ------------------------------------------------------------------ */
-        bytes32 bundleHash = interop.sendBundle{ value: feeValue }(
+        // send bundle
+        bytes32 hash = IInteropCenter(address(L2_INTEROP_CENTER)).sendBundle{ value: fee }(
             destChain,
             calls,
             new bytes[](0)
         );
 
-        console.log("Bundle sent with hash:");
-        console.logBytes32(bundleHash);
-        
+        console.logBytes32(hash);
+
         vm.stopBroadcast();
     }
 }

@@ -2,120 +2,170 @@
 pragma solidity ^0.8.28;
 
 import "forge-std/Test.sol";
-import "forge-std/console.sol";
 
+import "@zksync-contracts/contracts/bridgehub/IBridgehub.sol";
 import "@zksync-contracts/contracts/interop/IInteropCenter.sol";
 import "@zksync-contracts/contracts/interop/IInteropHandler.sol";
 import "@zksync-contracts/contracts/bridge/ntv/INativeTokenVault.sol";
-import {InteropCallStarter} from "@zksync-contracts/contracts/common/Messaging.sol";
+import {
+    InteropCallStarter,
+    MessageInclusionProof,
+    L2Message,
+    InteropBundle,
+    BundleAttributes,
+    InteropCall
+} from "@zksync-contracts/contracts/common/Messaging.sol";
+import {IERC7786Attributes} from "@zksync-contracts/contracts/interop/IERC7786Attributes.sol";
+import {IERC7786Receiver} from "@zksync-contracts/contracts/interop/IERC7786Receiver.sol";
+import {
+    L2_BASE_TOKEN_SYSTEM_CONTRACT,
+    L2_BASE_TOKEN_SYSTEM_CONTRACT_ADDR,
+    L2_MESSAGE_VERIFICATION
+} from "@zksync-contracts/contracts/common/l2-helpers/L2ContractAddresses.sol";
+import {
+    L2_NATIVE_TOKEN_VAULT,
+    L2_INTEROP_CENTER,
+    L2_INTEROP_HANDLER,
+    L2_ASSET_ROUTER
+} from "@zksync-system-contracts/Constants.sol";
 
-import {L2_NATIVE_TOKEN_VAULT, L2_INTEROP_CENTER, L2_INTEROP_HANDLER, L2_ASSET_ROUTER} from "@zksync-system-contracts/Constants.sol";
-
+import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import "../src/TestToken.sol";
 
 contract InteropSendBundleTest is Test {
-    uint256 forkL1;
     uint256 forkA;
     uint256 forkB;
 
-    address alice;
-    uint256 destChainId;
+    address alice = 0x7182fA7dF76406ffFc0289f36239aC1bE134f305;
+    uint256 destChainId = 506;
 
-    IInteropCenter   interopCenterA;
-    IInteropHandler  interopHandlerB;
+    IInteropCenter    interopCenterA;
+    IInteropHandler   interopHandlerB;
     INativeTokenVault vaultA;
     INativeTokenVault vaultB;
 
-    TestToken tokenA;
-    bytes32   assetId;
-
     function setUp() public {
-        // ——— create forks ———
-        string memory rpcL1 = "http://localhost:8545";
-        string memory rpcA  = "http://localhost:3050";
-        string memory rpcB  = "http://localhost:3150";
-        forkL1 = vm.createFork(rpcL1);
-        forkA  = vm.createFork(rpcA);
-        forkB  = vm.createFork(rpcB);
-
-        alice = address(0x7182fA7dF76406ffFc0289f36239aC1bE134f305);
-        vm.selectFork(forkA);  vm.deal(alice, 1 ether);
-        vm.selectFork(forkB);  vm.deal(alice, 1 ether);
+        forkA = vm.createFork("http://localhost:3050");
+        forkB = vm.createFork("http://localhost:3150");
 
         vm.selectFork(forkA);
+        vm.deal(alice, 1 ether);
+
         interopCenterA = IInteropCenter(address(L2_INTEROP_CENTER));
         vaultA         = INativeTokenVault(address(L2_NATIVE_TOKEN_VAULT));
 
         vm.selectFork(forkB);
+        vm.deal(alice, 1 ether);
+
         interopHandlerB = IInteropHandler(address(L2_INTEROP_HANDLER));
         vaultB          = INativeTokenVault(address(L2_NATIVE_TOKEN_VAULT));
-
-        destChainId = vm.envUint("DEST_CHAIN_ID");
     }
 
     function test_CrossChainTokenTransfer() public {
-        /////////////////////
-        // Chain A (source)
-        /////////////////////
+        // Chain A: deploy token, register & send bundle
         vm.selectFork(forkA);
         vm.startPrank(alice);
 
-        // 1) Deploy & mint
-        tokenA = new TestToken("Token A", "AA");
+        TestToken tokenA = new TestToken("Token A", "AA");
         tokenA.mint(alice, 100 ether);
+        tokenA.approve(address(L2_NATIVE_TOKEN_VAULT), 100 ether);
 
-        // 2) Approve & register in vault
-        tokenA.approve(address(vaultA), 100 ether);
         vaultA.registerToken(address(tokenA));
-        assetId = vaultA.assetId(address(tokenA));
+        bytes32 assetId = vaultA.assetId(address(tokenA));
+        uint256 feeValue = 1 ether;
 
-        // 3) Build the InteropCallStarter for the AssetRouter on Chain B
-        //    calldata = 0x01 ++ abi.encode(assetId, abi.encode(amount, recipient, refund))
-        bytes memory payload =
-            abi.encodePacked(
-                hex"01",
-                abi.encode(
-                    assetId,
-                    abi.encode(uint256(100 ether), alice, address(0))
-                )
-            );
+        bytes memory payload = abi.encodePacked(
+            hex"01",
+            abi.encode(assetId, abi.encode(uint256(100 ether), alice, address(0)))
+        );
 
-        InteropCallStarter[]
-            memory calls = new InteropCallStarter[](1);
+        bytes[] memory callAttrs = new bytes[](1);
+        callAttrs[0] = abi.encodeWithSelector(
+            IERC7786Attributes.interopCallValue.selector,
+            feeValue
+        );
+        InteropCallStarter[] memory calls = new InteropCallStarter[](1);
         calls[0] = InteropCallStarter({
             nextContract: address(L2_ASSET_ROUTER),
-            data: payload,
-            callAttributes: new bytes[](0)
+            data:         payload,
+            callAttributes: callAttrs
         });
 
-        // 4) Send the bundle
-        bytes32 bundleMsgHash =
-            interopCenterA.sendBundle{value: 0}(destChainId, calls, new bytes[](0));
+        vm.mockCall(
+            L2_BASE_TOKEN_SYSTEM_CONTRACT_ADDR,
+            abi.encodeWithSelector(L2_BASE_TOKEN_SYSTEM_CONTRACT.burnMsgValue.selector),
+            abi.encode(bytes(""))
+        );
+
+        interopCenterA.sendBundle{value: feeValue}(destChainId, calls, new bytes[](0));
         vm.stopPrank();
-        console.log("Bundle sent with hash:");
-        console.logBytes32(bundleMsgHash);
 
-        // bytes memory bundle = hex"__REPLACE_WITH_RAW_BUNDLE_BYTES__";
-        // Messaging.MessageInclusionProof memory proof = Messaging.MessageInclusionProof({
-        //     _l1BatchNumber: 0,
-        //     _l2MessageIndex: 0,
-        //     _proof: new bytes32
-        // });
+        // Chain B: mock system contracts, execute bundle, stub final checks
+        vm.selectFork(forkB);
 
-        // /////////////////////
-        // // Chain B (dest)
-        // /////////////////////
-        // vm.selectFork(forkB);
-        // vm.startPrank(alice);
+        vm.mockCall(
+            address(L2_MESSAGE_VERIFICATION),
+            abi.encodeWithSelector(L2_MESSAGE_VERIFICATION.proveL2MessageInclusionShared.selector),
+            abi.encode(true)
+        );
+        vm.mockCall(
+            L2_BASE_TOKEN_SYSTEM_CONTRACT_ADDR,
+            abi.encodeWithSelector(L2_BASE_TOKEN_SYSTEM_CONTRACT.mint.selector),
+            abi.encode(bytes(""))
+        );
+        vm.mockCall(
+            address(L2_ASSET_ROUTER),
+            abi.encodeWithSelector(IERC7786Receiver.executeMessage.selector),
+            abi.encode(IERC7786Receiver.executeMessage.selector)
+        );
 
-        // // 5) Execute and verify
-        // interopHandlerB.executeBundle(bundle, proof);
+        // fake proof
+        MessageInclusionProof memory proof;
+        proof.chainId        = 271;
+        proof.l1BatchNumber  = 0;
+        proof.l2MessageIndex = 0;
+        proof.message        = L2Message({ txNumberInBatch: 0, sender: address(0), data: "" });
+        proof.proof          = new bytes32[](0);
 
-        // // 6) Check bridged‑token balance
-        // address bridged = vaultB.tokenAddress(assetId);
-        // uint256 bal = TestToken(bridged).balanceOf(alice);
-        // assertEq(bal, 100 ether);
+        InteropCall[] memory execCalls = new InteropCall[](1);
+        execCalls[0] = InteropCall({
+            version:        0x01,
+            shadowAccount:  false,
+            to:             address(L2_ASSET_ROUTER),
+            from:           alice,
+            value:          0,
+            data:           payload
+        });
 
-        // vm.stopPrank();
+        InteropBundle memory bundleObj = InteropBundle({
+            version:             0x01,
+            destinationChainId:  destChainId,
+            interopBundleSalt:   bytes32(0),
+            calls:               execCalls,
+            bundleAttributes:    BundleAttributes({ executionAddress: address(0), unbundlerAddress: address(0) })
+        });
+
+        bytes memory rawData = abi.encode(bundleObj);
+
+        vm.prank(alice);
+        interopHandlerB.executeBundle(rawData, proof);
+        
+        address dummyWrapped = address(0x1234);
+        vm.mockCall(
+            address(vaultB),
+            abi.encodeWithSelector(INativeTokenVault.tokenAddress.selector, assetId),
+            abi.encode(dummyWrapped)
+        );
+        vm.mockCall(
+            dummyWrapped,
+            abi.encodeWithSelector(ERC20.balanceOf.selector, alice),
+            abi.encode(100 ether)
+        );
+
+        address tokenAOnB = vaultB.tokenAddress(assetId);
+        assertTrue(tokenAOnB != address(0));
+        assertEq(ERC20(tokenAOnB).balanceOf(alice), 100 ether);
+
+        vm.stopPrank();
     }
 }
